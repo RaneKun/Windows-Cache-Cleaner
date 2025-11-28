@@ -7,6 +7,8 @@ Just don’t try to sell it or repost it without giving proper credit. 🙂
 
 ---
 
+<p align="center"> <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge"> <img src="https://img.shields.io/badge/Language-Python%203.12-yellow?style=for-the-badge"> <img src="https://img.shields.io/badge/Build-Standalone%20EXE-green?style=for-the-badge"> <img src="https://img.shields.io/badge/Safe-No%20System%20Files%20Touched-brightgreen?style=for-the-badge"> </p>
+
 ## 🚀 What This Tool Does
 This cleaner targets only **safe-to-remove cache folders**, including:
 - Windows Update leftover downloads

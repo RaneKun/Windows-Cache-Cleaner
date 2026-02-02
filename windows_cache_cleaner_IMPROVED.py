@@ -48,6 +48,31 @@ PRESSED_DARKNESS_FACTOR = 0.6  # How much darker the pressed color should be (40
 BATCH_DELETE_SIZE = 100  # Number of files to delete before updating progress
 
 # =============================================================================
+# RESOURCE PATH HELPER (for PyInstaller)
+# =============================================================================
+
+def resource_path(relative_path):
+    """
+    Get absolute path to resource, works for dev and for PyInstaller.
+    When running as a PyInstaller bundle, files are extracted to a temp folder.
+    This function ensures we can find bundled resources like the icon.
+    
+    Args:
+        relative_path (str): Relative path to the resource
+        
+    Returns:
+        str: Absolute path to the resource
+    """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        # Running in normal Python environment
+        base_path = os.path.abspath(".")
+    
+    return os.path.join(base_path, relative_path)
+
+# =============================================================================
 # ADMIN PRIVILEGES CHECK
 # =============================================================================
 
@@ -1191,7 +1216,14 @@ class CleanerUI(QWidget):
         
         # Set window properties
         self.setWindowTitle(f"{APP_NAME} by Rane 🧹✨")
-        self.setWindowIcon(QIcon('windows_cache_cleaner.ico'))
+        
+        # Load window icon using resource_path for PyInstaller compatibility
+        try:
+            icon_file = resource_path('windows_cache_cleaner.ico')
+            if os.path.exists(icon_file):
+                self.setWindowIcon(QIcon(icon_file))
+        except Exception:
+            pass  # Icon is optional, continue without it
         
         # Get Windows accent colors for theming
         self.accent_color = get_windows_accent_color()
@@ -1827,7 +1859,7 @@ if __name__ == "__main__":
     
     # Try to load application icon
     try:
-        icon_path = "windows_cache_cleaner.ico"
+        icon_path = resource_path("windows_cache_cleaner.ico")
         if os.path.exists(icon_path):
             app.setWindowIcon(QIcon(icon_path))
     except Exception:
@@ -1856,3 +1888,4 @@ if __name__ == "__main__":
     
     # Start application event loop
     sys.exit(app.exec())
+

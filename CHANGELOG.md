@@ -4,6 +4,28 @@ All notable changes to Windows Cache Cleaner will be documented in this file.
 
 ---
 
+## [v2.1.0] - 2026-07-12
+
+### ✨ New Features
+
+#### 🐍 Coding/Dev Tool Cache Cleanup (New!)
+- **New cleanup option: "Coding/Dev Tool Caches"** — targets caches left behind by common development tools
+- **Locations covered:**
+  - `%LOCALAPPDATA%\pip\Cache` — pip's downloaded package/wheel cache
+  - `%USERPROFILE%\anaconda3\pkgs`, `%USERPROFILE%\miniconda3\pkgs`, `%USERPROFILE%\.conda\pkgs` — conda package cache (checks common install locations)
+  - `%APPDATA%\npm-cache` — npm cache
+  - `%LOCALAPPDATA%\Yarn\Cache` — Yarn cache
+- **Placed right under "User Temp Files"** in the checkbox grid for easy access
+- **Fully integrated** — works with Analyze mode, tooltips, and the existing checkbox persistence system just like every other option
+- **Safe** — only removes downloaded/cached packages; tools simply re-download them if needed again
+
+### ⚙️ Changes from v2.0.0
+
+- **Total cleanup options: 19 → 20**
+- No other behavior changed — this is an additive update
+
+---
+
 ## [v2.0.0] - 2024-01-20
 
 ### 🎉 Major Release - Complete Rewrite

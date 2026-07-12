@@ -29,7 +29,7 @@ Windows Cache Cleaner is a user-friendly desktop application that helps you recl
 ## ✨ Key Features
 
 ### 🎯 Smart & Safe Cleanup
-- **19 Different Cleanup Options** — From browser caches to Windows Update remnants
+- **20 Different Cleanup Options** — From browser caches to Windows Update remnants to dev tool caches
 - **Safe by Design** — Only targets non-critical cache folders
 - **Detailed Tooltips** — Hover over any option to see exactly what it cleans
 - **Confirmation Dialogs** — Prevents accidental deletions
@@ -61,6 +61,7 @@ This cleaner targets **only safe-to-remove cache folders**, including:
 | Category | What Gets Cleaned | Typical Space Saved |
 |----------|------------------|-------------------|
 | 🗂️ **Temp Files** | Windows & User temporary files | 1-10 GB |
+| 🐍 **Coding/Dev Tool Caches** | pip, conda, npm, Yarn caches | 500 MB - 10 GB |
 | 🌐 **Browser Caches** | Chrome, Edge, Firefox, Opera, Brave | 500 MB - 5 GB |
 | 📦 **Windows Update** | Downloaded update files | 500 MB - 5 GB |
 | 🎮 **GPU Shader Cache** | NVIDIA, AMD shader compilations | 100 MB - 2 GB |
@@ -158,16 +159,13 @@ python windows_cache_cleaner_IMPROVED.py
 ## 🎨 Screenshots
 
 ### Main Interface
-
-<img width="859" height="530" alt="Screenshot 2026-01-20 030250" src="https://github.com/user-attachments/assets/ea832474-fc8b-44fb-8213-48f808ed7799" />
+*Clean, modern UI with checkbox options and real-time feedback*
 
 ### Analyze Mode
-
-<img width="859" height="530" alt="Screenshot 2026-01-20 030254" src="https://github.com/user-attachments/assets/16782659-b9e0-46fd-858c-a47023a13325" />
+*Preview exactly how much space you'll free before cleaning*
 
 ### Live Operation Log
-
-<img width="859" height="530" alt="Screenshot 2026-01-20 030400" src="https://github.com/user-attachments/assets/36bb63ec-4f39-4f67-ad02-4819b2dc6cd9" />
+*Watch the cleanup happen in real-time with detailed status updates*
 
 ---
 
@@ -196,7 +194,18 @@ See `BUILD_INSTRUCTIONS.md` for detailed build instructions.
 
 ## 📊 Version History
 
-### v2.0.0 (Current)
+### v2.1.0 (Current)
+**Coding/Dev Tool Cache Cleanup** — Adds a new option to clear out pip, conda, npm, and Yarn caches
+
+**New Features:**
+- New "Coding/Dev Tool Caches" cleanup option, placed right under "User Temp Files"
+- Cleans pip cache, conda pkgs cache (anaconda3/miniconda3/.conda), npm cache, and Yarn cache
+- Fully integrated with Analyze mode, tooltips, and checkbox persistence
+
+**Changes:**
+- Total cleanup options: 19 → 20
+
+### v2.0.0
 **Major Rewrite** — Complete overhaul with modern features
 
 **New Features:**
@@ -221,7 +230,7 @@ See `BUILD_INSTRUCTIONS.md` for detailed build instructions.
 - Fixed missing Select All button functionality
 - Fixed DISM cleanup console window issue
 
-### v1.0.0
+### v1.1.0
 Initial public release
 
 ---
@@ -289,9 +298,9 @@ Full license text is available in the `LICENSE` file.
 
 **Created by RaneKun**
 
-- Icon taken from the web
+- Icon designed by RaneKun
 - UI/UX designed by RaneKun
-- Code written by RaneKun (with the help of [Claude](https://claude.ai))
+- Code written by RaneKun
 
 This is a hobby project built to help Windows users keep their systems clean and fast.
 

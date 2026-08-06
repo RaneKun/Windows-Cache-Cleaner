@@ -18,6 +18,8 @@
 
 ---
 
+<img width="1736" height="1056" alt="image" src="https://github.com/user-attachments/assets/879c2e8f-961a-48d7-a756-90eb7592b0c4" />
+
 ## 📖 Overview
 
 Windows Cache Cleaner is a user-friendly desktop application that helps you reclaim disk space by safely removing temporary files, cache data, and other unnecessary junk that accumulates over time on Windows systems.
@@ -92,9 +94,6 @@ Windows-Cache-Cleaner/
 ├── 🛠️ build_exe.bat                      ← Build script (Windows)
 ├── 🛠️ build_exe.py                       ← Build script (Python)
 ├── 📄 BUILD_INSTRUCTIONS.md              ← How to build the .exe
-│
-└── 📦 dist/
-    └── Windows Cache Cleaner.exe         ← Standalone executable
 ```
 
 ---
@@ -156,19 +155,6 @@ python windows_cache_cleaner_IMPROVED.py
 
 ---
 
-## 🎨 Screenshots
-
-### Main Interface
-*Clean, modern UI with checkbox options and real-time feedback*
-
-### Analyze Mode
-*Preview exactly how much space you'll free before cleaning*
-
-### Live Operation Log
-*Watch the cleanup happen in real-time with detailed status updates*
-
----
-
 ## 🔧 Building from Source
 
 Want to build the `.exe` yourself?
@@ -189,49 +175,6 @@ pyinstaller --onefile --windowed --name "Windows Cache Cleaner" --icon=windows_c
 ```
 
 See `BUILD_INSTRUCTIONS.md` for detailed build instructions.
-
----
-
-## 📊 Version History
-
-### v2.1.0 (Current)
-**Coding/Dev Tool Cache Cleanup** — Adds a new option to clear out pip, conda, npm, and Yarn caches
-
-**New Features:**
-- New "Coding/Dev Tool Caches" cleanup option, placed right under "User Temp Files"
-- Cleans pip cache, conda pkgs cache (anaconda3/miniconda3/.conda), npm cache, and Yarn cache
-- Fully integrated with Analyze mode, tooltips, and checkbox persistence
-
-**Changes:**
-- Total cleanup options: 19 → 20
-
-### v2.0.0
-**Major Rewrite** — Complete overhaul with modern features
-
-**New Features:**
-- Multi-threaded cleanup (UI never freezes)
-- Real-time progress bar and status updates
-- Analyze mode (preview space savings)
-- Live operation log
-- Stop/cancel functionality
-- Size tracking (shows exactly how much space freed)
-- Confirmation dialogs
-- Better error handling
-
-**Improvements:**
-- Comic Sans MS font throughout
-- Windows accent color integration
-- Proper app data directory (`%LOCALAPPDATA%\WindowsCacheCleaner`)
-- Better code organization and documentation
-- No debug print spam
-
-**Bug Fixes:**
-- Fixed UI freezing during cleanup
-- Fixed missing Select All button functionality
-- Fixed DISM cleanup console window issue
-
-### v1.1.0
-Initial public release
 
 ---
 

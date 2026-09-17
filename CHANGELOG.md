@@ -4,6 +4,46 @@ All notable changes to Windows Cache Cleaner will be documented in this file.
 
 ---
 
+## [v2.2.0] - 2026-09-17
+
+### ✨ New Features
+
+#### 🔄 Windows Upgrade & Previous Installation Cleanup (New!)
+- **New cleanup option: "Windows Upgrade Log Files"** — targets `C:\Windows\Panther`, the setup/upgrade logs left behind by Feature Updates
+- **New cleanup option: "Previous Windows Installation(s)"** — targets `C:\Windows.old`, `C:\$Windows.~BT`, and `C:\$Windows.~WS`
+  - ⚠️ **Not a cache** — this is your Windows upgrade rollback copy. Deleting it removes the "go back to the previous version of Windows" option
+  - Uses `takeown` + `icacls` to take ownership and grant Administrators full control before removal, since plain admin access isn't enough for everything inside `Windows.old` (much of it is owned by TrustedInstaller)
+  - Removes the folder outright rather than just emptying it
+  - **Excluded from "Select All"** — only gets checked when you check it yourself
+  - **Extra confirmation dialog** on top of the standard one, specifically warning about the rollback impact
+- **Both placed directly under "Windows Update Remnants"** in the checkbox grid
+
+#### 🧹 Disk Cleanup Parity Pass
+- **"Windows Update Remnants" is now more thorough** — stops the Windows Update and BITS services before clearing `SoftwareDistribution\Download` and restarts them afterward, since files locked by those services were silently failing to delete
+- **New cleanup option: "Recycle Bin"** — empties the Recycle Bin on every drive via the same API Explorer uses
+- **New cleanup option: "RetailDemo Offline Content"** — targets `C:\ProgramData\Microsoft\Windows\RetailDemo`
+- **New cleanup option: "Windows ESD Installation Files"** — targets `C:\ESD\Windows` and `C:\Windows\ESD`
+  - ⚠️ Frees several GB, but breaks the offline "Reset this PC" option until Windows re-downloads a fresh image
+- **New cleanup option: "Device Driver Packages"** — enumerates third-party driver packages via `pnputil` and removes ones not currently in use
+  - Deliberately uses plain `pnputil /delete-driver` (no `/uninstall`, no `/force`), so Windows' own in-use protection is what decides what's safe to remove
+  - ⚠️ A driver for temporarily unplugged hardware can look unused and get removed anyway
+- **"Crash Dumps" now also covers `C:\Windows\MEMORY.DMP`** — the full kernel memory dump file, in addition to the Minidump and CrashDumps folders it already cleaned
+
+### 🐛 Bug Fixes
+
+#### 📊 Analyze Mode Accuracy
+- **Fixed: Analyze mode was silently wrong for 8 of the 20 existing options** — "Crash Dumps," "Windows Logs," "GPU Shader Cache," "OneDrive / Photos Cache," "Windows Store + UWP Cache," "Browser Caches," and "WinSxS Cleanup (DISM)" always reported "Empty or not found" regardless of actual disk usage, because `get_operation_size()` had its own separate, incomplete path list that was never kept in sync with the real cleanup functions. "Icon Cache" had a related but different bug — it's a single file, and the size calculator only ever walked folders, so it also always reported as empty.
+- **Fix:** `get_operation_size()` now covers every cleanup option, using the exact same target paths (or the same dynamic discovery logic, for the handful of options that scan per-app or per-profile folders) as the real cleanup functions
+- **"WinSxS Cleanup (DISM)" and "Device Driver Packages"** now show "Size not shown in advance (computed when run)" in Analyze mode instead of a misleading "Empty or not found" — neither DISM nor pnputil expose a size up front
+
+### ⚙️ Changes from v2.1.0
+
+- **Total cleanup options: 20 → 26**
+- **App version constant corrected** from `2.0` to match the actual release version (`2.2.0`) — it had never been bumped when v2.1.0 shipped
+- All existing cleanup behavior is unchanged; every addition above is additive
+
+---
+
 ## [v2.1.0] - 2026-07-12
 
 ### ✨ New Features

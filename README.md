@@ -18,23 +18,25 @@
 
 ---
 
-<img width="1736" height="1056" alt="image" src="https://github.com/user-attachments/assets/879c2e8f-961a-48d7-a756-90eb7592b0c4" />
+<img width="1142" height="528" alt="Screenshot 2026-09-17 154952" src="https://github.com/user-attachments/assets/5b8a7254-b57d-4001-95f0-ad24b2a8901e" />
+
+<p align="center"><sub>Screenshot predates the v2.2.0 options below — the checkbox grid now has a few more entries than shown here.</sub></p>
 
 ## 📖 Overview
 
 Windows Cache Cleaner is a user-friendly desktop application that helps you reclaim disk space by safely removing temporary files, cache data, and other unnecessary junk that accumulates over time on Windows systems.
 
-**Version 2.0** brings a completely redesigned experience with multi-threading, real-time progress tracking, and an intuitive interface that makes cache cleaning effortless.
+This tool brings a completely redesigned experience with multi-threading, real-time progress tracking, and an intuitive interface that makes cache cleaning effortless.
 
 ---
 
 ## ✨ Key Features
 
 ### 🎯 Smart & Safe Cleanup
-- **20 Different Cleanup Options** — From browser caches to Windows Update remnants to dev tool caches
-- **Safe by Design** — Only targets non-critical cache folders
+- **26 Different Cleanup Options** — From browser caches to Windows Update remnants to dev tool caches
+- **Safe by Design** — Almost every option only targets non-critical cache folders; the few that aren't (like Previous Windows Installation) are clearly flagged in their tooltips and in the Safety & Security section below
 - **Detailed Tooltips** — Hover over any option to see exactly what it cleans
-- **Confirmation Dialogs** — Prevents accidental deletions
+- **Confirmation Dialogs** — Prevents accidental deletions, with an extra warning for the riskier options
 
 ### ⚡ Powerful Performance
 - **Non-Blocking UI** — Application stays responsive during cleanup
@@ -58,21 +60,26 @@ Windows Cache Cleaner is a user-friendly desktop application that helps you recl
 
 ## 🚀 What This Tool Cleans
 
-This cleaner targets **only safe-to-remove cache folders**, including:
+This cleaner mostly targets **safe-to-remove cache folders**, plus a small number of clearly-flagged options that go further than a cache (see Safety & Security below):
 
 | Category | What Gets Cleaned | Typical Space Saved |
 |----------|------------------|-------------------|
 | 🗂️ **Temp Files** | Windows & User temporary files | 1-10 GB |
 | 🐍 **Coding/Dev Tool Caches** | pip, conda, npm, Yarn caches | 500 MB - 10 GB |
 | 🌐 **Browser Caches** | Chrome, Edge, Firefox, Opera, Brave | 500 MB - 5 GB |
-| 📦 **Windows Update** | Downloaded update files | 500 MB - 5 GB |
+| 📦 **Windows Update** | Downloaded update files (services stopped first for a clean sweep) | 500 MB - 5 GB |
+| 📜 **Windows Upgrade Logs** | Setup/upgrade logs in `C:\Windows\Panther` | 50 MB - 1 GB |
+| 🗑️ **Recycle Bin** | Everything you've already deleted | Variable |
 | 🎮 **GPU Shader Cache** | NVIDIA, AMD shader compilations | 100 MB - 2 GB |
 | 🏪 **Windows Store** | UWP app caches | 200 MB - 3 GB |
 | 📸 **Thumbnails** | Icon and thumbnail caches | 50 MB - 500 MB |
-| 💥 **Crash Dumps** | System and app crash files | 100 MB - 5 GB |
+| 💥 **Crash Dumps** | System/app crash files + full `MEMORY.DMP` | 100 MB - 5 GB |
 | 📝 **System Logs** | Windows event and error logs | 100 MB - 2 GB |
 | ⚙️ **WinSxS** | Component store cleanup (via DISM) | 2 GB - 20 GB |
 | ...and more! | Prefetch, WebCache, RDP cache, etc. | Variable |
+| ⚠️ **Previous Windows Installation(s)** | `Windows.old` + leftover upgrade folders — **not a cache** | 5 GB - 20 GB |
+| ⚠️ **Windows ESD Installation Files** | Local image used for offline "Reset this PC" | 3 GB - 6 GB |
+| ⚠️ **Device Driver Packages** | Unused third-party driver packages | Variable |
 
 **Total Potential Savings:** 5 GB to 50+ GB depending on system age and usage
 
@@ -131,12 +138,23 @@ python windows_cache_cleaner_IMPROVED.py
 
 ### What Makes This Tool Safe?
 
-✅ **No Critical System Files** — Only cleans cache folders that Windows recreates automatically  
+✅ **Almost everything is a cache** — Most options only clean folders Windows recreates automatically  
+✅ **The exceptions are clearly flagged** — "Previous Windows Installation(s)," "Windows ESD Installation Files," and "Device Driver Packages" are marked with ⚠️ in their tooltips because they aren't caches  
 ✅ **Admin Rights Required** — Ensures you're aware of what the tool is doing  
 ✅ **Detailed Tooltips** — Full transparency about what each option does  
-✅ **Confirmation Dialogs** — Asks before making any changes  
+✅ **Confirmation Dialogs** — Asks before making any changes, with an extra dialog for Previous Windows Installation specifically  
 ✅ **Comprehensive Logging** — Everything is logged for review  
 ✅ **Open Source** — You can inspect the code yourself  
+
+### The Three Options That Aren't "Just a Cache"
+
+| Option | Why it's different | What you lose |
+|--------|--------------------|----------------|
+| **Previous Windows Installation(s)** | Removes `Windows.old` and leftover upgrade folders entirely | Can't roll back to your previous Windows version anymore |
+| **Windows ESD Installation Files** | Removes the local image used for offline PC reset | "Reset this PC" needs to download a fresh image instead |
+| **Device Driver Packages** | Removes driver packages pnputil reports as unused | A driver for hardware that's temporarily unplugged may need to be fetched again once reconnected |
+
+None of these three are swept in by "Select All" — each one only runs if you check it yourself.
 
 ### Antivirus False Positives
 
@@ -193,6 +211,7 @@ See `BUILD_INSTRUCTIONS.md` for detailed build instructions.
 - **Antivirus False Positives** — See "Safety & Security" section above
 - **Some Files May Be Locked** — Files in use won't be deleted (this is normal and safe)
 - **DISM Takes Time** — WinSxS cleanup can take 5-15 minutes (be patient)
+- **Driver Package Removal Is Conservative** — Some genuinely-unused driver packages may still get skipped; the tool never overrides Windows' own in-use protection to force one off
 
 ---
 

@@ -3,6 +3,7 @@ import os  # Provides operating system dependent functionality
 import shutil  # Provides high-level file operations
 import json  # Provides JSON parsing and serialization
 import glob  # Provides pathname pattern expansion
+import re  # Provides regular expression matching (used to parse command-line tool output)
 import subprocess  # Allows running external commands
 import datetime  # Provides date and time functionality
 import time  # Provides time-related functions
@@ -34,7 +35,7 @@ from PyQt6.QtGui import QPixmap, QIcon, QFont  # GUI elements for images, icons,
 
 # File paths for configuration and logging
 APP_NAME = "Windows Cache Cleaner"  # Application name
-APP_VERSION = "2.0"  # Application version
+APP_VERSION = "2.2.0"  # Application version
 APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA")) / "WindowsCacheCleaner"  # App data directory
 CONFIG_PATH = APP_DATA_DIR / "config.json"  # Configuration file path
 LOG_DIR = APP_DATA_DIR / "logs"  # Log directory path
@@ -569,6 +570,96 @@ def delete_folder_contents(path, log_file, worker):
     
     return success_count, failed_count, bytes_freed
 
+def run_hidden_command(cmd_list, timeout=None):
+    """
+    Run an external command (takeown, icacls, net, pnputil, Dism, etc.)
+    with no visible console window, since this app runs windowed and a
+    child console process would otherwise flash a window on screen.
+
+    Args:
+        cmd_list (list): Command and arguments to run
+        timeout (int, optional): Timeout in seconds
+
+    Returns:
+        subprocess.CompletedProcess: Result of the command (check .returncode)
+    """
+    return subprocess.run(
+        cmd_list,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        creationflags=subprocess.CREATE_NO_WINDOW
+    )
+
+def take_ownership_and_remove_folder(path, log_file, worker):
+    r"""
+    Forcefully remove a folder that's protected beyond what normal admin
+    access allows - e.g. C:\Windows.old, where many files are owned by
+    TrustedInstaller rather than Administrators.
+
+    Unlike delete_folder_contents(), this:
+      - Takes ownership of the whole tree and grants the Administrators
+        group full control first, since being an elevated admin alone
+        isn't enough to touch everything Windows protects this way.
+      - Removes the top-level folder itself, not just its contents.
+
+    Args:
+        path (str): Folder to remove completely
+        log_file: File object for logging
+        worker: Worker thread object
+
+    Returns:
+        tuple: (success_count, failed_count, bytes_freed)
+    """
+    if not os.path.exists(path):
+        log_info(log_file, f"Path does not exist, skipping: {path}")
+        return 0, 0, 0
+
+    log_info(log_file, f"Starting protected folder removal: {path}")
+    worker.status_updated.emit(f"Taking ownership of {os.path.basename(path)}...")
+
+    try:
+        # Take ownership of every file/folder in the tree, assigned to the
+        # Administrators group rather than just the current user
+        run_hidden_command(["takeown.exe", "/F", path, "/A", "/R", "/D", "Y"])
+        # Grant the Administrators group (well-known SID, locale independent)
+        # full control recursively
+        run_hidden_command(["icacls.exe", path, "/T", "/C", "/Q", "/grant", "*S-1-5-32-544:F"])
+    except Exception as e:
+        log_failure(log_file, f"Take ownership: {path}", str(e))
+        # Continue anyway - deletion may still partially succeed
+
+    if not worker.is_running:
+        return 0, 0, 0
+
+    # Measure size now that permissions are fixed, so the walk can actually
+    # see everything and the reported total is accurate
+    pre_size, pre_count = get_folder_size(path)
+
+    worker.status_updated.emit(f"Removing {os.path.basename(path)}...")
+
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception as e:
+        log_failure(log_file, f"Remove folder: {path}", str(e))
+
+    if os.path.exists(path):
+        # Some files survived even after taking ownership (still locked or
+        # in active use) - clean up what we can and get accurate counts
+        success, failed, _ = delete_folder_contents(path, log_file, worker)
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+        log_info(log_file, f"Protected folder removal completed (partial) - "
+                          f"Success: {success}, Failed: {failed}, Freed: ~{format_size(pre_size)}")
+        return success, failed, pre_size
+    else:
+        log_success(log_file, f"Removed folder: {path}")
+        log_info(log_file, f"Protected folder removal completed - "
+                          f"Success: {pre_count}, Failed: 0, Freed: {format_size(pre_size)}")
+        return pre_count, 0, pre_size
+
 def generic_folder_cleanup(operation_name, path, log_file, worker):
     """
     Generic cleanup function for folder-based operations.
@@ -621,6 +712,60 @@ def cleanup_user_temp(log_file, worker):
         worker
     )
 
+def cleanup_coding_caches(log_file, worker):
+    r"""
+    Clean common coding/development tool caches.
+    Locations:
+        - %LOCALAPPDATA%\pip\Cache
+        - %USERPROFILE%\anaconda3\pkgs, %USERPROFILE%\miniconda3\pkgs, %USERPROFILE%\.conda\pkgs
+        - %APPDATA%\npm-cache
+        - %LOCALAPPDATA%\Yarn\Cache
+    These caches build up over time from installing packages and dependencies.
+    """
+    log_info(log_file, "Starting Coding/Dev Tool Cache cleanup...")
+    worker.status_updated.emit("Cleaning: Coding/Dev Tool Caches")
+
+    local_appdata = os.getenv("LOCALAPPDATA")
+    appdata = os.getenv("APPDATA")
+    user_profile = os.getenv("USERPROFILE")
+
+    targets = []
+
+    # Pip download/wheel cache
+    if local_appdata:
+        targets.append(Path(local_appdata) / "pip" / "Cache")
+
+    # Conda package cache (common install locations)
+    if user_profile:
+        targets.append(Path(user_profile) / "anaconda3" / "pkgs")
+        targets.append(Path(user_profile) / "miniconda3" / "pkgs")
+        targets.append(Path(user_profile) / ".conda" / "pkgs")
+
+    # npm cache
+    if appdata:
+        targets.append(Path(appdata) / "npm-cache")
+
+    # Yarn cache
+    if local_appdata:
+        targets.append(Path(local_appdata) / "Yarn" / "Cache")
+
+    total_success = 0
+    total_failed = 0
+    total_freed = 0
+
+    for target_path in targets:
+        if not worker.is_running:
+            break
+        success, failed, freed = delete_folder_contents(str(target_path), log_file, worker)
+        total_success += success
+        total_failed += failed
+        total_freed += freed
+
+    log_info(log_file, f"Coding/Dev Tool Cache cleanup completed - Success: {total_success}, "
+                      f"Failed: {total_failed}, Freed: {format_size(total_freed)}")
+
+    return total_success, total_failed, total_freed
+
 def cleanup_prefetch(log_file, worker):
     r"""
     Clean Windows Prefetch files.
@@ -637,13 +782,42 @@ def cleanup_windows_update(log_file, worker):
     r"""
     Clean Windows Update download cache.
     Location: C:\Windows\SoftwareDistribution\Download
+
+    Stops the Windows Update and BITS services first and restarts
+    whichever of them it actually stopped afterward. While running,
+    those services can keep a lock on files in this folder, which was
+    causing some files to silently fail to delete.
     """
-    return generic_folder_cleanup(
-        "Windows Update Remnants",
-        r"C:\Windows\SoftwareDistribution\Download",
-        log_file,
-        worker
+    log_info(log_file, "Starting Windows Update Remnants cleanup...")
+    worker.status_updated.emit("Cleaning: Windows Update Remnants")
+
+    services_stopped = []
+    for service in ["wuauserv", "bits"]:
+        try:
+            result = run_hidden_command(["net.exe", "stop", service])
+            if result.returncode == 0:
+                services_stopped.append(service)
+                log_info(log_file, f"Stopped service: {service}")
+            else:
+                log_info(log_file, f"Could not stop service {service} (may already be stopped)")
+        except Exception as e:
+            log_info(log_file, f"Could not stop service {service}: {e}")
+
+    success, failed, freed = delete_folder_contents(
+        r"C:\Windows\SoftwareDistribution\Download", log_file, worker
     )
+
+    for service in services_stopped:
+        try:
+            run_hidden_command(["net.exe", "start", service])
+            log_info(log_file, f"Restarted service: {service}")
+        except Exception as e:
+            log_info(log_file, f"Could not restart service {service}: {e}")
+
+    log_info(log_file, f"Windows Update Remnants cleanup completed - Success: {success}, "
+                      f"Failed: {failed}, Freed: {format_size(freed)}")
+
+    return success, failed, freed
 
 def cleanup_delivery_opt(log_file, worker):
     r"""
@@ -750,6 +924,7 @@ def cleanup_crash_dumps(log_file, worker):
     Locations:
         - C:\Windows\Minidump (system crashes)
         - %LOCALAPPDATA%\CrashDumps (application crashes)
+        - C:\Windows\MEMORY.DMP (full kernel memory dump, if configured)
     """
     log_info(log_file, "Starting crash dump cleanup...")
     worker.status_updated.emit("Cleaning: Crash Dumps")
@@ -775,6 +950,24 @@ def cleanup_crash_dumps(log_file, worker):
     total_success += success
     total_failed += failed
     total_freed += freed
+    
+    # Check if worker should stop
+    if not worker.is_running:
+        return total_success, total_failed, total_freed
+    
+    # Full kernel memory dump (a single file, not a folder - only present
+    # if the system is configured to write one after a crash)
+    memory_dmp = r"C:\Windows\MEMORY.DMP"
+    if os.path.exists(memory_dmp):
+        try:
+            file_size = os.path.getsize(memory_dmp)
+            os.remove(memory_dmp)
+            total_success += 1
+            total_freed += file_size
+            log_success(log_file, f"Deleted memory dump: {memory_dmp}")
+        except (PermissionError, OSError) as e:
+            total_failed += 1
+            log_failure(log_file, f"Delete memory dump: {memory_dmp}", str(e))
     
     log_info(log_file, f"Crash dump cleanup completed - Success: {total_success}, "
                       f"Failed: {total_failed}, Freed: {format_size(total_freed)}")
@@ -1046,7 +1239,8 @@ def cleanup_winsxs(log_file, worker):
             ["Dism.exe", "/Online", "/Cleanup-Image", "/StartComponentCleanup"],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
         
         # Log DISM output
@@ -1076,6 +1270,216 @@ def cleanup_winsxs(log_file, worker):
         log_failure(log_file, "DISM cleanup operation", str(e))
         return 0, 1, 0
 
+def cleanup_windows_upgrade_logs(log_file, worker):
+    r"""
+    Clean Windows Upgrade log files.
+    Location: C:\Windows\Panther
+    These are setup/upgrade logs left behind by Feature Updates - only
+    useful for diagnosing a failed upgrade after the fact.
+    """
+    return generic_folder_cleanup(
+        "Windows Upgrade Log Files",
+        r"C:\Windows\Panther",
+        log_file,
+        worker
+    )
+
+def cleanup_previous_windows_install(log_file, worker):
+    r"""
+    Remove the previous Windows installation and leftover upgrade folders.
+    Locations:
+        - C:\Windows.old    (full copy of the prior installation)
+        - C:\$Windows.~BT   (temporary upgrade/boot files)
+        - C:\$Windows.~WS   (temporary web-setup upgrade files)
+
+    WARNING: Unlike every other option in this tool, this isn't a cache -
+    it's your rollback copy. Deleting it means "Go back to the previous
+    version of Windows" is no longer available. Only run this once
+    you're sure you don't need to roll back.
+
+    These folders are protected beyond normal admin access (many files
+    inside are owned by TrustedInstaller), so this uses
+    take_ownership_and_remove_folder() to take ownership and grant
+    Administrators full control before removing each one outright.
+    """
+    log_info(log_file, "Starting Previous Windows Installation cleanup...")
+    worker.status_updated.emit("Cleaning: Previous Windows Installation(s)")
+
+    targets = [
+        r"C:\Windows.old",
+        r"C:\$Windows.~BT",
+        r"C:\$Windows.~WS",
+    ]
+
+    total_success = 0
+    total_failed = 0
+    total_freed = 0
+
+    for target_path in targets:
+        if not worker.is_running:
+            break
+        success, failed, freed = take_ownership_and_remove_folder(target_path, log_file, worker)
+        total_success += success
+        total_failed += failed
+        total_freed += freed
+
+    log_info(log_file, f"Previous Windows Installation cleanup completed - Success: {total_success}, "
+                      f"Failed: {total_failed}, Freed: {format_size(total_freed)}")
+
+    return total_success, total_failed, total_freed
+
+def cleanup_recycle_bin(log_file, worker):
+    r"""
+    Empty the Recycle Bin on every drive.
+    Uses the SHEmptyRecycleBinW Windows API - the same mechanism
+    Explorer's own "Empty Recycle Bin" uses.
+    """
+    log_info(log_file, "Starting Recycle Bin cleanup...")
+    worker.status_updated.emit("Cleaning: Recycle Bin")
+
+    # SHEmptyRecycleBinW flags: no confirmation dialog, no progress UI, no sound
+    SHERB_NOCONFIRMATION = 0x00000001
+    SHERB_NOPROGRESSUI = 0x00000002
+    SHERB_NOSOUND = 0x00000004
+    flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND
+
+    # Measure size beforehand across all drives' Recycle Bins so we can
+    # still report bytes freed (the API itself doesn't return a count)
+    total_freed = 0
+    for drive_letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+        recycle_path = f"{drive_letter}:\\$Recycle.Bin"
+        if os.path.exists(recycle_path):
+            size, _ = get_folder_size(recycle_path)
+            total_freed += size
+
+    try:
+        result = ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, flags)
+        if result == 0:
+            log_success(log_file, "Recycle Bin emptied successfully")
+            log_info(log_file, f"Recycle Bin cleanup completed - Success: 1, "
+                              f"Failed: 0, Freed: {format_size(total_freed)}")
+            return 1, 0, total_freed
+        else:
+            log_failure(log_file, "Empty Recycle Bin", f"SHEmptyRecycleBinW returned code {result}")
+            return 0, 1, 0
+    except Exception as e:
+        log_failure(log_file, "Empty Recycle Bin", str(e))
+        return 0, 1, 0
+
+def cleanup_retaildemo(log_file, worker):
+    r"""
+    Clean RetailDemo offline content.
+    Location: C:\ProgramData\Microsoft\Windows\RetailDemo
+    Demo videos/assets used by retail display ("demo") mode - irrelevant
+    on a normal PC.
+    """
+    return generic_folder_cleanup(
+        "RetailDemo Offline Content",
+        r"C:\ProgramData\Microsoft\Windows\RetailDemo",
+        log_file,
+        worker
+    )
+
+def cleanup_esd_files(log_file, worker):
+    r"""
+    Remove Windows ESD installation files.
+    Locations:
+        - C:\ESD\Windows
+        - C:\Windows\ESD
+
+    WARNING: This is the local Windows image used by the offline
+    "Reset this PC" option. Deleting it frees several GB, but Reset
+    this PC will then need to download a fresh image instead of using
+    the one already on disk.
+
+    Uses take_ownership_and_remove_folder(), the same as Previous
+    Windows Installation, since some of these files can carry similarly
+    restrictive permissions.
+    """
+    log_info(log_file, "Starting Windows ESD Installation Files cleanup...")
+    worker.status_updated.emit("Cleaning: Windows ESD Installation Files")
+
+    targets = [
+        r"C:\ESD\Windows",
+        r"C:\Windows\ESD",
+    ]
+
+    total_success = 0
+    total_failed = 0
+    total_freed = 0
+
+    for target_path in targets:
+        if not worker.is_running:
+            break
+        success, failed, freed = take_ownership_and_remove_folder(target_path, log_file, worker)
+        total_success += success
+        total_failed += failed
+        total_freed += freed
+
+    log_info(log_file, f"Windows ESD Installation Files cleanup completed - Success: {total_success}, "
+                      f"Failed: {total_failed}, Freed: {format_size(total_freed)}")
+
+    return total_success, total_failed, total_freed
+
+def cleanup_driver_packages(log_file, worker):
+    r"""
+    Remove third-party driver packages that aren't currently in use.
+
+    Enumerates every third-party (oem*.inf) package via
+    "pnputil /enum-drivers" and attempts to delete each one with plain
+    "pnputil /delete-driver <inf>" - deliberately without /uninstall or
+    /force, so Windows' own in-use check is entirely what decides what's
+    safe to remove. A package still needed by a present device is
+    refused by pnputil itself and simply logged as skipped, rather than
+    forced off that device.
+
+    Caveat: a driver package for hardware that's temporarily unplugged
+    (e.g. a printer, a second monitor) can look unused and get removed
+    anyway - Windows would need to fetch that driver again next time
+    the hardware is reconnected.
+    """
+    log_info(log_file, "Starting Driver Package cleanup...")
+    worker.status_updated.emit("Cleaning: Device Driver Packages")
+
+    total_success = 0
+    total_failed = 0
+
+    try:
+        result = run_hidden_command(["pnputil.exe", "/enum-drivers"])
+    except Exception as e:
+        log_failure(log_file, "Enumerate driver packages", str(e))
+        return 0, 0, 0
+
+    published_names = re.findall(r"Published Name\s*:\s*(oem\d+\.inf)", result.stdout, re.IGNORECASE)
+
+    if not published_names:
+        log_info(log_file, "No third-party driver packages found")
+        return 0, 0, 0
+
+    for inf_name in published_names:
+        if not worker.is_running:
+            break
+
+        worker.status_updated.emit(f"Cleaning: Device Driver Packages ({inf_name})")
+
+        try:
+            del_result = run_hidden_command(["pnputil.exe", "/delete-driver", inf_name])
+            if del_result.returncode == 0:
+                total_success += 1
+                log_success(log_file, f"Removed driver package: {inf_name}")
+            else:
+                total_failed += 1
+                log_info(log_file, f"Skipped driver package (in use or protected): {inf_name}")
+        except Exception as e:
+            total_failed += 1
+            log_failure(log_file, f"Remove driver package: {inf_name}", str(e))
+
+    log_info(log_file, f"Driver Package cleanup completed - Success: {total_success}, "
+                      f"Failed/Skipped: {total_failed}")
+
+    # Driver packages don't map to a simple byte count the way files do
+    return total_success, total_failed, 0
+
 # =============================================================================
 # TOOLTIP DESCRIPTIONS
 # =============================================================================
@@ -1085,7 +1489,23 @@ TOOLTIPS = {
         "Cleans downloaded Windows Update files\n"
         "Location: C:\\Windows\\SoftwareDistribution\\Download\n"
         "Deletes: .cab, .msu, temporary update files\n"
+        "Stops/restarts the Windows Update + BITS services first so\n"
+        "locked files actually get removed\n"
         "Safe to clean - Windows will re-download if needed",
+    
+    "Windows Upgrade Log Files": 
+        "Cleans logs from Windows Feature Update upgrades\n"
+        "Location: C:\\Windows\\Panther\n"
+        "Deletes: setupact.log, setuperr.log, and other upgrade logs\n"
+        "Safe - only useful for diagnosing a failed upgrade after the fact",
+    
+    "Previous Windows Installation(s)": 
+        "⚠️ NOT a cache - removes your upgrade rollback copy\n"
+        "Locations: C:\\Windows.old, C:\\$Windows.~BT, C:\\$Windows.~WS\n"
+        "Deletes: The entire previous Windows installation and leftover\n"
+        "upgrade/setup files\n"
+        "Warning: You will no longer be able to go back to your previous\n"
+        "version of Windows after this runs. Excluded from Select All.",
     
     "Delivery Optimization Cache": 
         "Cleans peer-to-peer update delivery cache\n"
@@ -1167,6 +1587,12 @@ TOOLTIPS = {
         "Deletes: Temporary files created by user applications\n"
         "Safe - applications will create new temp files as needed",
     
+    "Coding/Dev Tool Caches": 
+        "Cleans caches used by coding and dev tools\n"
+        "Locations: pip Cache, conda pkgs, npm-cache, Yarn Cache\n"
+        "Deletes: Downloaded package/wheel/pkg cache files\n"
+        "Safe - tools will re-download packages if needed again",
+    
     "Windows Temp Files": 
         "Cleans system temporary files\n"
         "Location: C:\\Windows\\Temp\n"
@@ -1195,7 +1621,35 @@ TOOLTIPS = {
         "Cleans Internet Explorer and legacy Edge cache\n"
         "Location: %LOCALAPPDATA%\\Microsoft\\Windows\\INetCache\n"
         "Deletes: Temporary internet files from IE/old Edge\n"
-        "Safe - legacy browsers will rebuild cache"
+        "Safe - legacy browsers will rebuild cache",
+    
+    "Recycle Bin": 
+        "Empties the Recycle Bin on every drive\n"
+        "Deletes: Files you've already sent to the Recycle Bin\n"
+        "Safe, but permanent - you can't restore these afterward",
+    
+    "RetailDemo Offline Content": 
+        "Cleans retail/demo mode assets\n"
+        "Location: C:\\ProgramData\\Microsoft\\Windows\\RetailDemo\n"
+        "Deletes: Demo videos and assets used by retail display mode\n"
+        "Safe - irrelevant unless this PC is used as a store demo unit",
+    
+    "Windows ESD Installation Files": 
+        "⚠️ Breaks the offline \"Reset this PC\" option\n"
+        "Locations: C:\\ESD\\Windows, C:\\Windows\\ESD\n"
+        "Deletes: The local Windows image used to reset your PC without\n"
+        "internet access\n"
+        "Warning: Frees several GB, but Reset this PC will then need to\n"
+        "download a fresh image instead",
+    
+    "Device Driver Packages": 
+        "⚠️ Removes old/unused third-party driver packages\n"
+        "Uses: pnputil /enum-drivers and /delete-driver (no /force)\n"
+        "Windows itself refuses to remove a package a connected device is\n"
+        "actively using - but a driver for hardware that's unplugged right\n"
+        "now can look unused and get removed anyway\n"
+        "Recommended: only run this if you don't have unplugged/removable\n"
+        "hardware you'll reconnect later"
 }
 
 # =============================================================================
@@ -1241,10 +1695,13 @@ class CleanerUI(QWidget):
         self.checks = {
             "Windows Temp Files": cleanup_windows_temp,
             "User Temp Files": cleanup_user_temp,
+            "Coding/Dev Tool Caches": cleanup_coding_caches,
             "Prefetch Files": cleanup_prefetch,
             "Explorer Icon + Thumbnail Cache": cleanup_explorer_cache,
             "Icon Cache": cleanup_icon_cache,
             "Windows Update Remnants": cleanup_windows_update,
+            "Windows Upgrade Log Files": cleanup_windows_upgrade_logs,
+            "Previous Windows Installation(s)": cleanup_previous_windows_install,
             "Delivery Optimization Cache": cleanup_delivery_opt,
             "Crash Dumps": cleanup_crash_dumps,
             "WER Logs": cleanup_wer_logs,
@@ -1258,6 +1715,10 @@ class CleanerUI(QWidget):
             "Browser Caches": cleanup_browser_caches,
             "WebCache (File History)": cleanup_webcache,
             "WinSxS Cleanup (DISM)": cleanup_winsxs,
+            "Recycle Bin": cleanup_recycle_bin,
+            "RetailDemo Offline Content": cleanup_retaildemo,
+            "Windows ESD Installation Files": cleanup_esd_files,
+            "Device Driver Packages": cleanup_driver_packages,
         }
         
         # Load saved configuration
@@ -1466,16 +1927,31 @@ class CleanerUI(QWidget):
         """
         self.setStyleSheet(dynamic_style)
     
+    # Options that aren't "just a cache" - excluded from Select All so they
+    # only ever get checked on purpose, never swept in by one click
+    NON_CACHE_OPTIONS = {
+        "Previous Windows Installation(s)",
+        "Windows ESD Installation Files",
+        "Device Driver Packages",
+    }
+
     def toggle_select_all(self):
         """
-        Toggle all checkboxes on or off.
+        Toggle all checkboxes on or off, except the options in
+        NON_CACHE_OPTIONS - those aren't caches like everything else here,
+        so they should only ever get checked deliberately.
         """
+        bulk_toggle_checks = {
+            label: cb for label, cb in self.checkbox_widgets.items()
+            if label not in self.NON_CACHE_OPTIONS
+        }
+        
         # Check if any checkbox is unchecked
-        any_unchecked = any(not cb.isChecked() for cb in self.checkbox_widgets.values())
+        any_unchecked = any(not cb.isChecked() for cb in bulk_toggle_checks.values())
         
         # Set all checkboxes to the same state
         new_state = any_unchecked
-        for cb in self.checkbox_widgets.values():
+        for cb in bulk_toggle_checks.values():
             cb.setChecked(new_state)
         
         # Update button text
@@ -1521,7 +1997,9 @@ class CleanerUI(QWidget):
             # each cleanup function would have a corresponding "get_paths" function
             size, count = self.get_operation_size(operation_name)
             
-            if size > 0:
+            if operation_name in ("WinSxS Cleanup (DISM)", "Device Driver Packages"):
+                analysis_text += f"⚙ {operation_name}: Size not shown in advance (computed when run)\n"
+            elif size > 0:
                 total_size += size
                 total_files += count
                 analysis_text += f"✓ {operation_name}: {format_size(size)} ({count:,} files)\n"
@@ -1553,20 +2031,114 @@ class CleanerUI(QWidget):
         Returns:
             tuple: (total_size_bytes, file_count)
         """
-        # Map operation names to their paths
+        local_appdata = Path(os.getenv("LOCALAPPDATA"))
+
+        # A few operations discover their targets dynamically (glob over
+        # per-app/per-profile folders, or span every drive) instead of a
+        # fixed path list, so they're resolved here rather than in the
+        # static map below - using the same discovery logic as the actual
+        # cleanup function, so Analyze can't drift out of sync with it again.
+
+        if operation_name == "Icon Cache":
+            # A single file, not a folder - get_folder_size() only walks
+            # directories, so this needs its own handling
+            icon_cache_path = str(local_appdata / "IconCache.db")
+            if os.path.exists(icon_cache_path):
+                return os.path.getsize(icon_cache_path), 1
+            return 0, 0
+
+        if operation_name == "Windows Store + UWP Cache":
+            total_size, total_files = 0, 0
+            packages_dir = local_appdata / "Packages"
+            if packages_dir.exists():
+                for folder in packages_dir.iterdir():
+                    if not folder.is_dir():
+                        continue
+                    for cache_dir in ["TempState", "AC", "LocalCache"]:
+                        size, count = get_folder_size(str(folder / cache_dir))
+                        total_size += size
+                        total_files += count
+            return total_size, total_files
+
+        if operation_name == "Browser Caches":
+            total_size, total_files = 0, 0
+            appdata = Path(os.getenv("APPDATA"))
+            chromium_browsers = [
+                "Google\\Chrome",
+                "Microsoft\\Edge",
+                "Opera Software\\Opera Stable",
+                "BraveSoftware\\Brave-Browser",
+            ]
+            for browser in chromium_browsers:
+                for subfolder in ["Cache", "GPUCache", "Code Cache"]:
+                    path = local_appdata / browser / "User Data" / "Default" / subfolder
+                    size, count = get_folder_size(str(path))
+                    total_size += size
+                    total_files += count
+            firefox_pattern = str(appdata / "Mozilla" / "Firefox" / "Profiles" / "*" / "cache2")
+            for profile in glob.glob(firefox_pattern):
+                size, count = get_folder_size(profile)
+                total_size += size
+                total_files += count
+            return total_size, total_files
+
+        if operation_name == "OneDrive / Photos Cache":
+            total_size, total_files = get_folder_size(str(local_appdata / "Microsoft" / "OneDrive"))
+            for pf in (local_appdata / "Packages").glob("Microsoft.Windows.Photos_*"):
+                size, count = get_folder_size(str(pf / "LocalCache"))
+                total_size += size
+                total_files += count
+            return total_size, total_files
+
+        if operation_name == "Recycle Bin":
+            total_size, total_files = 0, 0
+            for drive_letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+                recycle_path = f"{drive_letter}:\\$Recycle.Bin"
+                if os.path.exists(recycle_path):
+                    size, count = get_folder_size(recycle_path)
+                    total_size += size
+                    total_files += count
+            return total_size, total_files
+
+        if operation_name in ("WinSxS Cleanup (DISM)", "Device Driver Packages"):
+            # DISM and pnputil don't expose a size/count before actually
+            # running, so there's nothing meaningful to preview here -
+            # analyze_cleanup() shows a distinct message for these two
+            # rather than treating this as "nothing to clean"
+            return 0, 0
+
+        # Everything else maps to a fixed list of paths
         path_map = {
             "Windows Temp Files": [r"C:\Windows\Temp"],
-            "User Temp Files": [str(Path(os.getenv("LOCALAPPDATA")) / "Temp")],
+            "User Temp Files": [str(local_appdata / "Temp")],
+            "Coding/Dev Tool Caches": [
+                str(local_appdata / "pip" / "Cache"),
+                str(Path(os.getenv("USERPROFILE")) / "anaconda3" / "pkgs"),
+                str(Path(os.getenv("USERPROFILE")) / "miniconda3" / "pkgs"),
+                str(Path(os.getenv("USERPROFILE")) / ".conda" / "pkgs"),
+                str(Path(os.getenv("APPDATA")) / "npm-cache"),
+                str(local_appdata / "Yarn" / "Cache"),
+            ],
             "Prefetch Files": [r"C:\Windows\Prefetch"],
             "Windows Update Remnants": [r"C:\Windows\SoftwareDistribution\Download"],
+            "Windows Upgrade Log Files": [r"C:\Windows\Panther"],
+            "Previous Windows Installation(s)": [r"C:\Windows.old", r"C:\$Windows.~BT", r"C:\$Windows.~WS"],
             "Delivery Optimization Cache": [r"C:\ProgramData\Microsoft\Windows\DeliveryOptimization"],
-            "Explorer Icon + Thumbnail Cache": [str(Path(os.getenv("LOCALAPPDATA")) / "Microsoft" / "Windows" / "Explorer")],
-            "Icon Cache": [str(Path(os.getenv("LOCALAPPDATA")) / "IconCache.db")],
+            "Crash Dumps": [r"C:\Windows\Minidump", str(local_appdata / "CrashDumps"), r"C:\Windows\MEMORY.DMP"],
+            "Explorer Icon + Thumbnail Cache": [str(local_appdata / "Microsoft" / "Windows" / "Explorer")],
             "WER Logs": [r"C:\ProgramData\Microsoft\Windows\WER"],
+            "Windows Logs": [r"C:\Windows\Logs", r"C:\Windows\System32\LogFiles"],
             "DirectX Shader Cache": [str(Path.home() / "AppData" / "Local" / "D3DSCache")],
-            "RDP Cache": [str(Path(os.getenv("LOCALAPPDATA")) / "Microsoft" / "Terminal Server Client" / "Cache")],
-            "INetCache (IE/Legacy Edge)": [str(Path(os.getenv("LOCALAPPDATA")) / "Microsoft" / "Windows" / "INetCache")],
-            "WebCache (File History)": [str(Path(os.getenv("LOCALAPPDATA")) / "Microsoft" / "Windows" / "WebCache")],
+            "GPU Shader Cache": [
+                str(local_appdata / "NVIDIA" / "DXCache"),
+                str(local_appdata / "NVIDIA" / "GLCache"),
+                str(local_appdata / "AMD" / "DxCache"),
+            ],
+            "RDP Cache": [str(local_appdata / "Microsoft" / "Terminal Server Client" / "Cache")],
+            "INetCache (IE/Legacy Edge)": [str(local_appdata / "Microsoft" / "Windows" / "INetCache")],
+            "WebCache (File History)": [str(local_appdata / "Microsoft" / "Windows" / "WebCache")],
+            "RetailDemo Offline Content": [r"C:\ProgramData\Microsoft\Windows\RetailDemo"],
+            "Windows ESD Installation Files": [r"C:\ESD\Windows", r"C:\Windows\ESD"],
         }
         
         # Get paths for this operation
@@ -1596,6 +2168,25 @@ class CleanerUI(QWidget):
             QMessageBox.warning(self, "No Selection", 
                               "Please select at least one cleanup option. 🤔")
             return
+        
+        # Previous Windows Installation(s) is categorically riskier than
+        # everything else here - it's not a cache, it's your upgrade
+        # rollback copy - so it gets its own explicit warning on top of
+        # the normal confirmation below.
+        if "Previous Windows Installation(s)" in selected_ops:
+            extra_confirm = QMessageBox.warning(
+                self,
+                "⚠️ Previous Windows Installation Selected",
+                "You've selected \"Previous Windows Installation(s)\".\n\n"
+                "This removes C:\\Windows.old and any leftover upgrade folders "
+                "entirely - NOT just a cache. Once it's gone, you can no longer "
+                "roll back to your previous version of Windows.\n\n"
+                "Only continue if you're sure you won't need to go back.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel
+            )
+            if extra_confirm != QMessageBox.StandardButton.Yes:
+                return
         
         # Show confirmation dialog
         op_list = "\n• ".join(selected_ops.keys())
@@ -1888,4 +2479,3 @@ if __name__ == "__main__":
     
     # Start application event loop
     sys.exit(app.exec())
-

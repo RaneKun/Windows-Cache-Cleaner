@@ -4,6 +4,81 @@ All notable changes to Windows Cache Cleaner will be documented in this file.
 
 ---
 
+## [v2.3.1] - 2026-09-23
+
+### 🛡️ Safety & Correctness Fixes
+
+#### 🖼️ Explorer Icon + Thumbnail Cache Is Now Surgical
+- **"Explorer Icon + Thumbnail Cache" now only removes `thumbcache_*` and `iconcache_*` files** in `%LOCALAPPDATA%\Microsoft\Windows\Explorer`, rather than wiping the entire folder
+- **New helper `delete_files_matching(folder, patterns, ...)`** — deletes only the files directly in a folder that match one of the given glob patterns; used where a folder is documented to hold specific cache files rather than being nothing but cache
+- Analyze mode uses the same pattern matching, so the previewed size now matches exactly what gets removed
+
+#### 🔄 OneDrive Cleanup Is Now Non-Destructive
+- **"OneDrive / Photos Cache" no longer deletes `%LOCALAPPDATA%\Microsoft\OneDrive` directly**
+  - On the default per-user install, `OneDrive.exe` and its DLLs live inside that folder alongside `settings\` and `logs\` — deleting it can leave OneDrive needing a full reinstall instead of just a resync
+- **Now uses Microsoft's own supported reset:** `onedrive.exe /reset` — clears the client's local cache/settings and forces a fresh re-sync without touching the installed app
+- **Checks both install paths** — the per-user location first, then `C:\Program Files\Microsoft OneDrive\OneDrive.exe` (used by newer/managed Windows 11 installs)
+- **Photos app cache is still cleaned directly** — `%LOCALAPPDATA%\Packages\Microsoft.Windows.Photos_*\LocalCache` is a standard, disposable UWP app cache folder, so no change there
+
+#### 🌐 Browser Caches Now Actually Reaches Opera
+- **Fixed: Opera was silently skipped** — Opera (the regular `Opera Stable` channel) keeps its cache directly under `%LOCALAPPDATA%\Opera Software\Opera Stable`, *not* under `User Data\Default\` the way Chrome, Edge, and Brave do. The previous code built Opera's path as if it followed the same layout, which resolved to a folder that never exists on a real install — so both the cleanup and Analyze would quietly do nothing for it
+- **New helper `get_chromium_browser_cache_folders(local_appdata)`** — returns the Cache/GPUCache/Code Cache folders for every supported Chromium-based browser, using the correct layout per browser (Opera also gets its own `Media Cache` folder, which no other browser has)
+- Both `cleanup_browser_caches()` and `get_operation_size("Browser Caches")` now call this helper, so cleanup and Analyze can't drift apart
+
+#### 📏 Partial Failures Are No Longer Counted as Successes
+- **Fixed: `delete_folder_contents()` was swallowing failures** — it was calling `shutil.rmtree(dirpath, ignore_errors=True)`, which silently swallows any error inside the tree (locked file, permission denied, etc.) and returns normally either way. Every failed subdirectory was being counted as a **success** in the totals
+- **Fix:** removed `ignore_errors=True`. Every file was already tried individually before `rmtree` runs, so the flag bought nothing but a false success count — letting `rmtree` raise means a partial failure is now reported honestly
+- **`take_ownership_and_remove_folder()` deliberately keeps `ignore_errors=True`** on its first bulk `rmtree` attempt (a single rmtree over the whole tree with no prior per-file attempt — without the flag, the first locked file would abort the walk early and leave far more behind than necessary). The `os.path.exists()` check right after is what keeps it honest: anything that survived is handed to `delete_folder_contents()` for accurate per-file accounting
+
+#### 📊 Freed-Size Reporting Is Now Honest
+- **Fixed: `take_ownership_and_remove_folder()` was reporting the full pre-measured size as "freed" even on partial failures** — if some files survived the `rmtree` (still locked or in use), the reported bytes freed would still count everything
+- **Fix:** after the fallback `delete_folder_contents()` pass, it now re-measures what's actually left (if anything) and reports `pre_size - remaining_size` — the real number, not a best guess
+
+#### 📂 `get_folder_size()` Now Handles Single Files
+- **Fixed: single-file targets silently reported as empty** — `C:\Windows\MEMORY.DMP` is a single file, not a folder. `os.walk()` on a file path doesn't raise — it just yields nothing — so the size calculator was reporting `0 bytes / 0 files` for a multi-gigabyte file
+- **Fix:** `get_folder_size()` now checks `os.path.isfile()` first and returns `(os.path.getsize(path), 1)` directly for a file
+
+### 🐛 Analyze Mode Accuracy
+
+- **Fixed: `get_operation_size("Browser Caches")` was missing Opera's cache** — see Browser Caches section above
+- **Fixed: `get_operation_size("Explorer Icon + Thumbnail Cache")` was measuring the whole folder** while cleanup only removed `thumbcache_*`/`iconcache_*` — the two are now aligned via the same pattern match
+- **Fixed: `get_operation_size("Icon Cache")` was always returning `0, 0`** — `IconCache.db` is a single file, not a folder, so the folder-only size walker never saw it. Now handled by the `get_folder_size()` single-file fix above
+- **"WinSxS Cleanup (DISM)" and "Device Driver Packages" now return `None, None`** from `get_operation_size()` instead of `0, 0` — this makes "not computed in advance" unambiguous from "genuinely empty/not found" at every call site, rather than requiring callers to separately hardcode these two names
+
+### 🔒 User-Facing Improvements
+
+#### ✅ Run Cleanup Now Shows an Estimate in the Confirmation Dialog
+- **The confirmation dialog now displays** "Estimated: X across Y files" before you click Yes, computed with the exact same `get_operation_size()` that Analyze uses — so the number shown there can never quietly drift out of sync with Analyze
+- Options that can't be previewed (WinSxS, Driver Packages) are noted inline in the dialog as "size not known until it actually runs"
+
+#### 🏷️ Select All Button Label Now Stays Accurate
+- **Fixed: "Select All" button label was only ever updated by the button itself** — checking every box by hand left it still saying "Select All"
+- **New `sync_select_all_button_text()` method**, connected to every checkbox's `stateChanged` signal — the label now correctly reads "Deselect All 📋" or "Select All 📋" regardless of how the boxes ended up that way
+
+#### ⏱️ Completion Dialog Now Shows How Long It Took
+- **New `format_duration(seconds)` helper** — formats durations as `"42s"`, `"3m 05s"`, or `"1h 02m 10s"`
+- **`CleanupWorker.task_completed` signal now carries duration** as an additional parameter
+- The final "Cleanup Complete" dialog and the on-screen status label both show the total time taken
+
+#### 🚦 Clearer Startup Error if Windows Environment Variables Are Missing
+- **New check at startup** for `LOCALAPPDATA`, `APPDATA`, and `USERPROFILE` — every cleanup and analysis path in the app eventually reads one of these, and a missing one used to raise a cryptic `TypeError` deep inside a cleanup function
+- Now shows a single clear dialog explaining which variable(s) are missing and what likely caused it (e.g. running under a stripped-down service context), then exits cleanly
+
+### ⚙️ Internal Cleanup
+
+- **Removed unused `QPixmap` import** from the PyQt6 import block
+- **`BATCH_DELETE_SIZE` constant now actually used** — the status-update every N files was hardcoded as `10`; it now reads from the constant
+- **Docstrings expanded** on `delete_folder_contents()`, `take_ownership_and_remove_folder()`, and `get_chromium_browser_cache_folders()` explaining *why* specific decisions were made (e.g. why `ignore_errors=True` is used in one function but not another)
+- **App version constant bumped** from `2.2.0` to `2.3.1`
+
+### ⚙️ Changes from v2.2.0
+
+- **Total cleanup options: 26 (unchanged)** — this release is a fix-and-tighten release, not a feature release
+- **No cleanup behavior was broadened** — several options were made *narrower* (Explorer, OneDrive) rather than wider
+- **No migration needed** — config file format is unchanged
+
+---
+
 ## [v2.2.0] - 2026-09-17
 
 ### ✨ New Features
@@ -311,18 +386,6 @@ This massive rewrite was inspired by:
 
 ---
 
-### 🔮 What's Next?
-
-Potential features for future releases:
-- Background/wallpaper image support
-- Scheduled automatic cleanup
-- Custom cleanup rule creation
-- Cleanup history dashboard
-- One-click "recommended cleanup" profile
-- Before/after disk space comparison
-
----
-
 ## [v1.1.0] - Initial Release
 
 ### Features
@@ -346,6 +409,6 @@ Potential features for future releases:
 ---
 
 <p align="center">
-  <strong>Version 2.0.0 represents a complete evolution of Windows Cache Cleaner</strong><br>
-  <sub>From functional tool → Professional application</sub>
+  <strong>Version 2.3.1 keeps the tool honest and predictable</strong><br>
+  <sub>Quiet fixes where they matter most</sub>
 </p>

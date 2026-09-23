@@ -145,7 +145,7 @@ The build script handles everything — checking Python, installing PyInstaller 
 |---------|-----|
 | **"Some files couldn't be deleted"** | Normal — files currently in use by a running app get skipped. Close what you can and re-run. |
 | **WinSxS cleanup is taking forever** | DISM is slow by design. 5-15 minutes is expected. Let it run. |
-| **Antivirus blocked the .exe** | False positive — see the "Note About Antivirus" section above. |
+| **Antivirus blocked the .exe** | False positive — see the "[Note About Antivirus](https://github.com/RaneKun/Windows-Cache-Cleaner#a-note-about-antivirus)" section above. |
 | **Windows Defender "unknown publisher" warning** | Click "More info" → "Run anyway". The tool isn't code-signed (that costs money), but the source is public. |
 
 ---

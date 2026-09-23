@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
     QTextEdit  # Provides multi-line text display
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal  # Core Qt functionality, threading, and signals
-from PyQt6.QtGui import QPixmap, QIcon, QFont  # GUI elements for images, icons, and fonts
+from PyQt6.QtGui import QIcon, QFont  # GUI elements for icons and fonts
 
 # =============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -35,7 +35,7 @@ from PyQt6.QtGui import QPixmap, QIcon, QFont  # GUI elements for images, icons,
 
 # File paths for configuration and logging
 APP_NAME = "Windows Cache Cleaner"  # Application name
-APP_VERSION = "2.2.0"  # Application version
+APP_VERSION = "2.3.1"  # Application version
 APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA")) / "WindowsCacheCleaner"  # App data directory
 CONFIG_PATH = APP_DATA_DIR / "config.json"  # Configuration file path
 LOG_DIR = APP_DATA_DIR / "logs"  # Log directory path
@@ -276,12 +276,34 @@ def format_size(bytes_size):
         bytes_size /= 1024.0
     return f"{bytes_size:.2f} PB"
 
+def format_duration(seconds):
+    """
+    Format a duration in seconds into a human-readable string, for the
+    elapsed-time display in the UI (the log file keeps its own plain
+    "NN.NN seconds" format, which is fine for a log).
+
+    Args:
+        seconds (float): Duration in seconds
+
+    Returns:
+        str: Formatted duration (e.g., "42s", "3m 05s", "1h 02m 10s")
+    """
+    total_seconds = int(round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
 def get_folder_size(path):
     """
-    Calculate the total size of all files in a folder.
-    
+    Calculate the total size of all files in a folder - or of a single
+    file, if path points at one.
+
     Args:
-        path (str): Path to the folder
+        path (str): Path to the folder (or a single file)
         
     Returns:
         tuple: (total_size_bytes, file_count)
@@ -292,7 +314,18 @@ def get_folder_size(path):
     # Check if path exists
     if not os.path.exists(path):
         return 0, 0
-    
+
+    # Some cleanup targets are a single file rather than a folder (e.g. the
+    # full kernel memory dump, C:\Windows\MEMORY.DMP). os.walk() on a file
+    # path doesn't raise - it just yields nothing - so without this check
+    # this function would silently report 0 bytes / 0 files for a
+    # multi-gigabyte file instead of its real size.
+    if os.path.isfile(path):
+        try:
+            return os.path.getsize(path), 1
+        except (OSError, FileNotFoundError):
+            return 0, 0
+
     try:
         # Walk through directory tree
         for dirpath, dirnames, filenames in os.walk(path):
@@ -310,6 +343,51 @@ def get_folder_size(path):
         pass
     
     return total_size, file_count
+
+def get_chromium_browser_cache_folders(local_appdata):
+    """
+    Return the Cache/GPUCache/Code Cache folders for every supported
+    Chromium-based browser, given %LOCALAPPDATA% as a Path. Shared by the
+    cleanup function and the Analyze size-preview so they can't drift out
+    of sync with each other.
+
+    Chrome, Edge and Brave all nest their profile under
+    "<Browser>\\User Data\\Default". Opera (regular "Opera Stable" - not
+    Opera GX, which still uses the old flat layout) does NOT follow that
+    layout: its cache lives directly under "Opera Software\\Opera Stable",
+    while the rest of its profile is kept in %APPDATA% (roaming) rather
+    than %LOCALAPPDATA%, specifically so a large cache doesn't get swept
+    up by Windows roaming profiles. Building Opera's path the same way as
+    the other three resolves to something that never exists on a real
+    install, so both cleanup and the size preview would silently do
+    nothing for it.
+
+    Args:
+        local_appdata (Path): %LOCALAPPDATA%, e.g. Path(os.getenv("LOCALAPPDATA"))
+
+    Returns:
+        list[Path]: every cache-type folder to clean/measure
+    """
+    standard_chromium_browsers = [
+        "Google\\Chrome",
+        "Microsoft\\Edge",
+        "BraveSoftware\\Brave-Browser",
+    ]
+    cache_subfolders = ["Cache", "GPUCache", "Code Cache"]
+
+    folders = []
+    for browser in standard_chromium_browsers:
+        for subfolder in cache_subfolders:
+            folders.append(local_appdata / browser / "User Data" / "Default" / subfolder)
+
+    # Opera: profile root and cache root are the same folder - no
+    # "User Data\Default" nesting. "Media Cache" is Opera-specific (used
+    # for video/audio caching) and has no equivalent in the other three.
+    opera_root = local_appdata / "Opera Software" / "Opera Stable"
+    for subfolder in cache_subfolders + ["Media Cache"]:
+        folders.append(opera_root / subfolder)
+
+    return folders
 
 # =============================================================================
 # CONFIGURATION HANDLING
@@ -363,7 +441,7 @@ class CleanupWorker(QThread):
     status_updated = pyqtSignal(str)  # Emits status messages
     operation_started = pyqtSignal(str)  # Emits when an operation starts
     operation_completed = pyqtSignal(str, int, int, int)  # Emits (name, success, failed, bytes)
-    task_completed = pyqtSignal(int, int, int, float)  # Emits (ops, success, failed, size_freed, duration)
+    task_completed = pyqtSignal(int, int, int, float, float)  # Emits (ops, success, failed, size_freed, duration)
     error_occurred = pyqtSignal(str)  # Emits error messages
     
     def __init__(self, selected_operations, log_file_path):
@@ -462,7 +540,7 @@ class CleanupWorker(QThread):
         
         # Emit completion signal with statistics
         self.task_completed.emit(operations_count, total_success_count, 
-                                total_failed_count, total_size_freed)
+                                total_failed_count, float(total_size_freed), duration)
     
     def stop(self):
         """
@@ -525,8 +603,8 @@ def delete_folder_contents(path, log_file, worker):
                     success_count += 1
                     bytes_freed += file_size
                     
-                    # Update status every 10 files to reduce UI updates
-                    if success_count % 10 == 0:
+                    # Update status every BATCH_DELETE_SIZE files to reduce UI updates
+                    if success_count % BATCH_DELETE_SIZE == 0:
                         worker.status_updated.emit(
                             f"{worker.current_operation}: Deleted {success_count} files "
                             f"({format_size(bytes_freed)} freed)"
@@ -551,8 +629,16 @@ def delete_folder_contents(path, log_file, worker):
                 dirpath = os.path.join(root, dirname)
                 
                 try:
-                    # Delete directory and all its contents
-                    shutil.rmtree(dirpath, ignore_errors=True)
+                    # Delete directory and all its contents. Deliberately NOT
+                    # ignore_errors=True: with that flag, rmtree swallows any
+                    # failure inside the tree (locked file, permission
+                    # denied, etc.) and returns normally either way, so this
+                    # would count as a "success" below even when the
+                    # directory - or files already logged as failed_count
+                    # above - didn't actually get removed. Letting it raise
+                    # means a partial failure is reported as one, like every
+                    # other failure path in this function.
+                    shutil.rmtree(dirpath)
                     success_count += 1
                     
                 except Exception as e:
@@ -568,6 +654,60 @@ def delete_folder_contents(path, log_file, worker):
     log_info(log_file, f"Folder cleanup completed - Success: {success_count}, "
                       f"Failed: {failed_count}, Freed: {format_size(bytes_freed)}")
     
+    return success_count, failed_count, bytes_freed
+
+def delete_files_matching(folder, patterns, log_file, worker):
+    """
+    Delete only the files directly in `folder` (not its subfolders) whose
+    names match one of the given glob patterns, instead of wiping
+    everything in the folder. Used where a folder is documented to hold
+    specific cache files (e.g. thumbcache_*/iconcache_*) rather than being
+    a folder that's nothing but cache - narrower and safer than
+    delete_folder_contents() for that case.
+
+    Args:
+        folder (str): Folder to search (not walked recursively)
+        patterns (list[str]): glob patterns to match, e.g. ["thumbcache_*"]
+        log_file: File object for logging
+        worker: Worker thread object
+
+    Returns:
+        tuple: (success_count, failed_count, bytes_freed)
+    """
+    success_count = 0
+    failed_count = 0
+    bytes_freed = 0
+
+    if not os.path.exists(folder):
+        log_info(log_file, f"Path does not exist, skipping: {folder}")
+        return 0, 0, 0
+
+    # A set, not a list: if two patterns ever overlap (not the case for the
+    # thumbcache_*/iconcache_* patterns in use today, but a future addition
+    # could), the same file would otherwise appear twice - the second
+    # delete attempt would hit FileNotFoundError and get miscounted as a
+    # failure even though the file really was removed.
+    matched_files = set()
+    for pattern in patterns:
+        matched_files.update(glob.glob(os.path.join(folder, pattern)))
+
+    for filepath in matched_files:
+        if not worker.is_running:
+            break
+        if not os.path.isfile(filepath):
+            continue
+        try:
+            file_size = os.path.getsize(filepath)
+            os.remove(filepath)
+            success_count += 1
+            bytes_freed += file_size
+        except (PermissionError, FileNotFoundError, OSError) as e:
+            failed_count += 1
+            log_failure(log_file, f"Delete file: {filepath}", str(e))
+        except Exception as e:
+            failed_count += 1
+            log_failure(log_file, f"Unexpected error deleting file: {filepath}", str(e))
+
     return success_count, failed_count, bytes_freed
 
 def run_hidden_command(cmd_list, timeout=None):
@@ -602,6 +742,18 @@ def take_ownership_and_remove_folder(path, log_file, worker):
         group full control first, since being an elevated admin alone
         isn't enough to touch everything Windows protects this way.
       - Removes the top-level folder itself, not just its contents.
+      - Deliberately keeps shutil.rmtree(..., ignore_errors=True) for the
+        first bulk attempt below, unlike delete_folder_contents(). There,
+        every file is already tried individually before rmtree ever runs,
+        so ignore_errors=True bought nothing but a false "success" count.
+        Here it's a single rmtree over the whole tree with no prior
+        per-file attempt - without ignore_errors=True, the very first
+        locked file would abort the whole walk early and leave far more
+        behind than necessary for a folder this size. The `os.path.exists()`
+        check right after is what keeps this honest: if anything survived,
+        it's handed to delete_folder_contents() for accurate per-file
+        accounting rather than assumed successful. Intentionally
+        best-effort by design, not an oversight.
 
     Args:
         path (str): Folder to remove completely
@@ -651,9 +803,19 @@ def take_ownership_and_remove_folder(path, log_file, worker):
             os.rmdir(path)
         except OSError:
             pass
+        # Measure what's actually left (if anything) rather than reporting
+        # the full pre-measured size as "freed" - the same approximation
+        # ignore_errors=True caused in delete_folder_contents() before that
+        # was fixed, just narrower here since it only affects this one
+        # partial-failure branch.
+        if os.path.exists(path):
+            remaining_size, _ = get_folder_size(path)
+        else:
+            remaining_size = 0
+        actual_freed = max(pre_size - remaining_size, 0)
         log_info(log_file, f"Protected folder removal completed (partial) - "
-                          f"Success: {success}, Failed: {failed}, Freed: ~{format_size(pre_size)}")
-        return success, failed, pre_size
+                          f"Success: {success}, Failed: {failed}, Freed: {format_size(actual_freed)}")
+        return success, failed, actual_freed
     else:
         log_success(log_file, f"Removed folder: {path}")
         log_info(log_file, f"Protected folder removal completed - "
@@ -833,16 +995,24 @@ def cleanup_delivery_opt(log_file, worker):
 
 def cleanup_explorer_cache(log_file, worker):
     r"""
-    Clean Windows Explorer cache (icons, thumbnails).
+    Clean Windows Explorer's icon and thumbnail cache files.
     Location: %LOCALAPPDATA%\Microsoft\Windows\Explorer
+    Only files matching thumbcache_*/iconcache_* are removed, rather than
+    everything in the folder, so this can't reach beyond what the icon and
+    thumbnail cache actually is.
     """
+    log_info(log_file, "Starting Explorer Icon + Thumbnail Cache cleanup...")
+    worker.status_updated.emit("Cleaning: Explorer Icon + Thumbnail Cache")
+    
     path = str(Path(os.getenv("LOCALAPPDATA")) / "Microsoft" / "Windows" / "Explorer")
-    return generic_folder_cleanup(
-        "Explorer Icon + Thumbnail Cache",
-        path,
-        log_file,
-        worker
+    success, failed, freed = delete_files_matching(
+        path, ["thumbcache_*", "iconcache_*"], log_file, worker
     )
+    
+    log_info(log_file, f"Explorer Icon + Thumbnail Cache completed - Success: {success}, "
+                      f"Failed: {failed}, Freed: {format_size(freed)}")
+    
+    return success, failed, freed
 
 def cleanup_gpu_cache(log_file, worker):
     r"""
@@ -1038,10 +1208,24 @@ def cleanup_windows_logs(log_file, worker):
 
 def cleanup_onedrive_photos(log_file, worker):
     r"""
-    Clean OneDrive and Photos app caches.
+    Reset OneDrive's local sync cache and clear the Photos app cache.
+
+    %LOCALAPPDATA%\Microsoft\OneDrive is deliberately NOT deleted directly
+    here. On the default per-user install (the default on Windows 10/11),
+    OneDrive.exe and its DLLs for the installed version live inside that
+    exact folder, alongside settings\ (sync configuration/CID files) and
+    logs\ (diagnostics with real sync-state data) - none of which are
+    disposable the way a browser cache is. Recursively wiping it can leave
+    OneDrive needing a full reinstall instead of just a resync.
+
     Locations:
-        - %LOCALAPPDATA%\Microsoft\OneDrive
+        - OneDrive: reset via "onedrive.exe /reset" - Microsoft's own
+          supported way to clear the client's local cache/settings and
+          force a fresh re-sync, without touching the installed app.
+          Checks both the per-user and per-machine install paths.
         - %LOCALAPPDATA%\Packages\Microsoft.Windows.Photos_*\LocalCache
+          (a standard, disposable UWP app cache folder - still cleaned
+          directly, same as before)
     """
     log_info(log_file, "Starting OneDrive and Photos cache cleanup...")
     worker.status_updated.emit("Cleaning: OneDrive / Photos Cache")
@@ -1052,12 +1236,30 @@ def cleanup_onedrive_photos(log_file, worker):
     total_failed = 0
     total_freed = 0
     
-    # OneDrive cache
-    onedrive_path = str(base / "Microsoft" / "OneDrive")
-    success, failed, freed = delete_folder_contents(onedrive_path, log_file, worker)
-    total_success += success
-    total_failed += failed
-    total_freed += freed
+    # OneDrive: reset via its own /reset switch rather than deleting files
+    # under its install folder (see docstring). This doesn't produce a
+    # bytes-freed number the way a file deletion does - the actual cache
+    # clearing and re-sync happens in the background after OneDrive
+    # restarts, so there's nothing to measure immediately; it only
+    # contributes to the success/failure counts below.
+    onedrive_exe = base / "Microsoft" / "OneDrive" / "OneDrive.exe"
+    if not onedrive_exe.exists():
+        # Some systems (notably newer/managed Windows 11 installs) use the
+        # per-machine install location instead of the per-user one.
+        onedrive_exe = Path(r"C:\Program Files\Microsoft OneDrive\OneDrive.exe")
+    
+    if onedrive_exe.exists():
+        try:
+            run_hidden_command([str(onedrive_exe), "/reset"], timeout=15)
+            total_success += 1
+            log_success(log_file, f"Reset OneDrive cache via: {onedrive_exe} /reset")
+        except Exception as e:
+            total_failed += 1
+            log_failure(log_file, "Reset OneDrive cache", str(e))
+    else:
+        log_info(log_file, f"OneDrive.exe not found (checked per-user and "
+                          f"per-machine install paths) - skipping, OneDrive "
+                          f"may not be installed")
     
     # Check if worker should stop
     if not worker.is_running:
@@ -1168,27 +1370,10 @@ def cleanup_browser_caches(log_file, worker):
     LOCAL = Path(os.getenv("LOCALAPPDATA"))
     APPDATA = Path(os.getenv("APPDATA"))
     
-    # Chromium-based browsers cache paths
-    chromium_browsers = [
-        "Google\\Chrome",
-        "Microsoft\\Edge",
-        "Opera Software\\Opera Stable",
-        "BraveSoftware\\Brave-Browser"
-    ]
-    
-    chromium_folders = []
-    
-    # Add Cache folders
-    for browser in chromium_browsers:
-        chromium_folders.append(LOCAL / browser / "User Data" / "Default" / "Cache")
-    
-    # Add GPUCache folders
-    for browser in chromium_browsers:
-        chromium_folders.append(LOCAL / browser / "User Data" / "Default" / "GPUCache")
-    
-    # Add Code Cache folders
-    for browser in chromium_browsers:
-        chromium_folders.append(LOCAL / browser / "User Data" / "Default" / "Code Cache")
+    # Chromium-based browsers cache paths (Opera included - see
+    # get_chromium_browser_cache_folders() for why it needs different
+    # handling than Chrome/Edge/Brave)
+    chromium_folders = get_chromium_browser_cache_folders(LOCAL)
     
     total_success = 0
     total_failed = 0
@@ -1523,7 +1708,7 @@ TOOLTIPS = {
     "Browser Caches": 
         "Cleans cache for multiple browsers\n"
         "Browsers: Chrome, Edge, Opera, Brave, Firefox\n"
-        "Locations: AppData\\Local\\[Browser]\\User Data\\Default\\Cache\n"
+        "Locations: AppData\\Local\\[Browser]\\...\\Cache (Opera uses its own layout)\n"
         "Deletes: Temporary web files, images, scripts\n"
         "Safe - websites will reload slightly slower next visit",
     
@@ -1570,9 +1755,9 @@ TOOLTIPS = {
         "Warning: Removes system event history - useful for troubleshooting",
     
     "OneDrive / Photos Cache": 
-        "Cleans OneDrive and Photos app caches\n"
-        "Locations: OneDrive settings cache, Photos app cache\n"
-        "Deletes: Temporary sync files, photo thumbnails\n"
+        "Resets OneDrive's cache and cleans the Photos app cache\n"
+        "OneDrive: reset via its own \"onedrive.exe /reset\" (doesn't touch the app itself)\n"
+        "Photos: deletes the app's LocalCache folder directly\n"
         "Safe - OneDrive will resync, Photos will rebuild cache",
     
     "Prefetch Files": 
@@ -1765,6 +1950,12 @@ class CleanerUI(QWidget):
             # Store checkbox reference
             self.checkbox_widgets[label] = cb
             
+            # Keep the Select All / Deselect All button label in sync even
+            # when boxes are checked individually rather than via that
+            # button - previously only toggle_select_all() ever updated it,
+            # so manually checking every box left it saying "Select All".
+            cb.stateChanged.connect(self.sync_select_all_button_text)
+            
             # Add to grid
             grid_layout.addWidget(cb, row, col)
             
@@ -1949,13 +2140,29 @@ class CleanerUI(QWidget):
         # Check if any checkbox is unchecked
         any_unchecked = any(not cb.isChecked() for cb in bulk_toggle_checks.values())
         
-        # Set all checkboxes to the same state
+        # Set all checkboxes to the same state. Each setChecked() call below
+        # fires sync_select_all_button_text() via the stateChanged
+        # connection made when the checkboxes were created, so the button
+        # label ends up correct without setting it again here.
         new_state = any_unchecked
         for cb in bulk_toggle_checks.values():
             cb.setChecked(new_state)
-        
-        # Update button text
-        self.select_all_btn.setText("Deselect All 📋" if new_state else "Select All 📋")
+    
+    def sync_select_all_button_text(self):
+        """
+        Keep the Select All / Deselect All button label matching the actual
+        checkbox states. Connected to every checkbox's stateChanged signal
+        (see the checkbox-creation loop) so this stays correct whether
+        boxes were checked via that button or one at a time by hand.
+        """
+        bulk_toggle_checks = {
+            label: cb for label, cb in self.checkbox_widgets.items()
+            if label not in self.NON_CACHE_OPTIONS
+        }
+        all_checked = bool(bulk_toggle_checks) and all(
+            cb.isChecked() for cb in bulk_toggle_checks.values()
+        )
+        self.select_all_btn.setText("Deselect All 📋" if all_checked else "Select All 📋")
     
     def analyze_cleanup(self):
         """
@@ -1997,7 +2204,7 @@ class CleanerUI(QWidget):
             # each cleanup function would have a corresponding "get_paths" function
             size, count = self.get_operation_size(operation_name)
             
-            if operation_name in ("WinSxS Cleanup (DISM)", "Device Driver Packages"):
+            if size is None:
                 analysis_text += f"⚙ {operation_name}: Size not shown in advance (computed when run)\n"
             elif size > 0:
                 total_size += size
@@ -2039,14 +2246,6 @@ class CleanerUI(QWidget):
         # static map below - using the same discovery logic as the actual
         # cleanup function, so Analyze can't drift out of sync with it again.
 
-        if operation_name == "Icon Cache":
-            # A single file, not a folder - get_folder_size() only walks
-            # directories, so this needs its own handling
-            icon_cache_path = str(local_appdata / "IconCache.db")
-            if os.path.exists(icon_cache_path):
-                return os.path.getsize(icon_cache_path), 1
-            return 0, 0
-
         if operation_name == "Windows Store + UWP Cache":
             total_size, total_files = 0, 0
             packages_dir = local_appdata / "Packages"
@@ -2063,18 +2262,10 @@ class CleanerUI(QWidget):
         if operation_name == "Browser Caches":
             total_size, total_files = 0, 0
             appdata = Path(os.getenv("APPDATA"))
-            chromium_browsers = [
-                "Google\\Chrome",
-                "Microsoft\\Edge",
-                "Opera Software\\Opera Stable",
-                "BraveSoftware\\Brave-Browser",
-            ]
-            for browser in chromium_browsers:
-                for subfolder in ["Cache", "GPUCache", "Code Cache"]:
-                    path = local_appdata / browser / "User Data" / "Default" / subfolder
-                    size, count = get_folder_size(str(path))
-                    total_size += size
-                    total_files += count
+            for path in get_chromium_browser_cache_folders(local_appdata):
+                size, count = get_folder_size(str(path))
+                total_size += size
+                total_files += count
             firefox_pattern = str(appdata / "Mozilla" / "Firefox" / "Profiles" / "*" / "cache2")
             for profile in glob.glob(firefox_pattern):
                 size, count = get_folder_size(profile)
@@ -2083,11 +2274,32 @@ class CleanerUI(QWidget):
             return total_size, total_files
 
         if operation_name == "OneDrive / Photos Cache":
-            total_size, total_files = get_folder_size(str(local_appdata / "Microsoft" / "OneDrive"))
+            # OneDrive itself is reset via "onedrive.exe /reset" rather than
+            # measured/deleted as a folder (see cleanup_onedrive_photos'
+            # docstring), so there's no byte count to preview for that part -
+            # same idea as WinSxS/Driver Packages below. Only the Photos app
+            # cache is genuinely measurable in advance.
+            total_size, total_files = 0, 0
             for pf in (local_appdata / "Packages").glob("Microsoft.Windows.Photos_*"):
                 size, count = get_folder_size(str(pf / "LocalCache"))
                 total_size += size
                 total_files += count
+            return total_size, total_files
+
+        if operation_name == "Explorer Icon + Thumbnail Cache":
+            # Matches cleanup_explorer_cache(), which only removes
+            # thumbcache_*/iconcache_* files rather than the whole folder -
+            # see delete_files_matching() for why.
+            total_size, total_files = 0, 0
+            explorer_path = local_appdata / "Microsoft" / "Windows" / "Explorer"
+            for pattern in ("thumbcache_*", "iconcache_*"):
+                for filepath in glob.glob(str(explorer_path / pattern)):
+                    if os.path.isfile(filepath):
+                        try:
+                            total_size += os.path.getsize(filepath)
+                            total_files += 1
+                        except (OSError, FileNotFoundError):
+                            continue
             return total_size, total_files
 
         if operation_name == "Recycle Bin":
@@ -2102,10 +2314,11 @@ class CleanerUI(QWidget):
 
         if operation_name in ("WinSxS Cleanup (DISM)", "Device Driver Packages"):
             # DISM and pnputil don't expose a size/count before actually
-            # running, so there's nothing meaningful to preview here -
-            # analyze_cleanup() shows a distinct message for these two
-            # rather than treating this as "nothing to clean"
-            return 0, 0
+            # running. Returning None (rather than 0) makes "not computed"
+            # unambiguous to every caller - a real empty/not-found result is
+            # still (0, 0), so callers can't mistake one for the other
+            # without each having to separately hardcode these two names.
+            return None, None
 
         # Everything else maps to a fixed list of paths
         path_map = {
@@ -2125,7 +2338,7 @@ class CleanerUI(QWidget):
             "Previous Windows Installation(s)": [r"C:\Windows.old", r"C:\$Windows.~BT", r"C:\$Windows.~WS"],
             "Delivery Optimization Cache": [r"C:\ProgramData\Microsoft\Windows\DeliveryOptimization"],
             "Crash Dumps": [r"C:\Windows\Minidump", str(local_appdata / "CrashDumps"), r"C:\Windows\MEMORY.DMP"],
-            "Explorer Icon + Thumbnail Cache": [str(local_appdata / "Microsoft" / "Windows" / "Explorer")],
+            "Icon Cache": [str(local_appdata / "IconCache.db")],
             "WER Logs": [r"C:\ProgramData\Microsoft\Windows\WER"],
             "Windows Logs": [r"C:\Windows\Logs", r"C:\Windows\System32\LogFiles"],
             "DirectX Shader Cache": [str(Path.home() / "AppData" / "Local" / "D3DSCache")],
@@ -2188,18 +2401,43 @@ class CleanerUI(QWidget):
             if extra_confirm != QMessageBox.StandardButton.Yes:
                 return
         
+        # Build a quick space/file estimate for the dialog below, using the
+        # same get_operation_size() Analyze uses - so the number shown here
+        # always matches what Analyze would report, and can't quietly drift
+        # out of sync with it the way the deletion logic itself once could.
+        self.status_label.setText("Estimating space to be freed...")
+        QApplication.processEvents()
+
+        estimated_size = 0
+        estimated_files = 0
+        no_preview_ops = []
+        for label in selected_ops:
+            size, count = self.get_operation_size(label)
+            if size is None:
+                no_preview_ops.append(label)
+                continue
+            estimated_size += size
+            estimated_files += count
+            QApplication.processEvents()
+
+        estimate_line = f"Estimated: {format_size(estimated_size)} across {estimated_files:,} files"
+        if no_preview_ops:
+            estimate_line += f"\n({' / '.join(no_preview_ops)}: size not known until it actually runs)"
+
         # Show confirmation dialog
         op_list = "\n• ".join(selected_ops.keys())
         confirm = QMessageBox.question(
             self, 
             "Confirm Cleanup",
             f"You are about to clean:\n\n• {op_list}\n\n"
+            f"{estimate_line}\n\n"
             f"This action cannot be undone. Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
         
         if confirm != QMessageBox.StandardButton.Yes:
+            self.status_label.setText("Status: Ready 💤")
             return
         
         # Save current configuration
@@ -2305,7 +2543,7 @@ class CleanerUI(QWidget):
         """
         self.log_display.append(f"❌ Error: {error_message}\n")
     
-    def on_task_completed(self, ops_count, success, failed, size_freed):
+    def on_task_completed(self, ops_count, success, failed, size_freed, duration):
         """
         Handle task completion notification from the worker thread.
         
@@ -2313,11 +2551,12 @@ class CleanerUI(QWidget):
             ops_count (int): Number of operations performed
             success (int): Total successful operations
             failed (int): Total failed operations
-            size_freed (int): Total bytes freed
+            size_freed (float): Total bytes freed
+            duration (float): Total time taken, in seconds
         """
         # Update UI
         self.progress_bar.setValue(100)
-        self.status_label.setText("Cleanup complete! ✨")
+        self.status_label.setText(f"Cleanup complete in {format_duration(duration)} ✨")
         
         # Update log display
         self.log_display.append("\n" + "="*50)
@@ -2327,6 +2566,7 @@ class CleanerUI(QWidget):
         self.log_display.append(f"Successful operations: {success}")
         self.log_display.append(f"Failed operations: {failed}")
         self.log_display.append(f"Space freed: {format_size(size_freed)}")
+        self.log_display.append(f"Time taken: {format_duration(duration)}")
         self.log_display.append("="*50 + "\n")
         
         # Show completion message
@@ -2335,7 +2575,8 @@ class CleanerUI(QWidget):
             f"Operations performed: {ops_count}\n"
             f"Successful file operations: {success}\n"
             f"Failed file operations: {failed}\n"
-            f"Space freed: {format_size(size_freed)}\n\n"
+            f"Space freed: {format_size(size_freed)}\n"
+            f"Time taken: {format_duration(duration)}\n\n"
             f"Log file saved to:\n{self.worker.log_file_path}"
         )
         
@@ -2443,6 +2684,31 @@ if __name__ == "__main__":
     # Set application properties
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
+    
+    # Every cleanup/analysis path in this app eventually does
+    # Path(os.getenv("LOCALAPPDATA")) or similar, which raises a cryptic
+    # TypeError deep inside some cleanup function if the variable is
+    # missing - checking once here, at startup, means a clear message
+    # instead of scattering a None-guard across every one of those call
+    # sites. This should never actually trigger on a normal interactive
+    # Windows session, since Windows itself sets all three for every user.
+    missing_env_vars = [
+        var for var in ("LOCALAPPDATA", "APPDATA", "USERPROFILE")
+        if not os.getenv(var)
+    ]
+    if missing_env_vars:
+        QMessageBox.critical(
+            None,
+            "Missing Environment Variables",
+            "This app couldn't find the following required Windows "
+            "environment variable(s):\n\n"
+            f"{', '.join(missing_env_vars)}\n\n"
+            "This usually means it's running under an account or session "
+            "type that doesn't set them normally (e.g. a stripped-down "
+            "service context). Try running it from a normal interactive "
+            "desktop session."
+        )
+        sys.exit(1)
     
     # Set application font to Comic Sans MS (matching your style)
     comic_sans_font = QFont("Comic Sans MS", 9)

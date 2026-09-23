@@ -8,7 +8,7 @@ This guide walks you through turning the Python script into a standalone `.exe` 
 
 Just two things:
 
-1. **Python installed on your PC** (you already have this since you ran the script)
+1. **Python installed on your PC** (you already have this if you ran the main script before)
 2. **These three files in the same folder:**
    - `windows_cache_cleaner.py` — the app itself
    - `windows_cache_cleaner.ico` — the icon (optional, but nice to have)
@@ -85,7 +85,7 @@ Once you've got your `.exe`, you can:
 - **Send it to anyone** — they don't need Python installed
 - **Make a shortcut** — right-click → Send to → Desktop
 
-**Heads up on file size:** it'll be around 15–25 MB, since the `.exe` carries its own little Python setup inside. That's normal.
+**Heads up on file size:** it'll be around 30–35 MB, since the `.exe` carries its own little Python setup inside. That's normal.
 
 ---
 
